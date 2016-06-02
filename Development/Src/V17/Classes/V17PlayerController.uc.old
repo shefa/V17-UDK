@@ -1,0 +1,467 @@
+//  ================================================================================================
+//   * File Name:    V17PlayerController
+//   * Created By:   User
+//   * Time Stamp:     30.1.2014 ??. 01:12:17 ??.
+//   * UDK Path:   C:\UDK\UDK-2013-07
+//   * Unreal X-Editor v3.1.4.0
+//   * ?? Copyright 2012 - 2014. All Rights Reserved.
+//  ================================================================================================
+
+class V17PlayerController extends UTPlayerController;
+
+var Pawn Hero;
+var Pawn OtherP;
+var V17Pawn myPawn;
+
+var int MyTypeOfPlayer;
+
+//min distance to switch pawns EBI GO TUI PO KUSNO
+var int CrashingDistance;
+
+//var PawnWeaponType WeaponType;
+
+var float RotationSpeed;        // Velocidad de rotaci??n del Pawn
+var bool bTurningToFire;        // Flag que indica si el Pawn est?? girando sobre s?? mismo para disparar
+var bool bPendingStopFire;      // Flag que indica que durante el giro se dej?? de pulsar el disparo.
+var byte lastFireModeNum;       // Almacena el modo de disparo para aplicarlo tras el giro.
+var bool bA, bW, bD, bAlt;
+ 
+//Extiende el estado PlayerWalking, sobreescribiendo PlayerMove
+
+Simulated Event PostBeginPlay() {
+    
+        //very important line
+    super.postbeginplay();
+    
+    //YourPawn
+    //myPawn = V17Pawn(Pawn);
+    //myPawn.setPC(Self);
+    
+    //find cloest playerstart to YourPawn
+    //findClosestPlayerStart();
+}
+
+exec Function WhatItemsDoIHave()
+{
+    local V17Weapon V17Weap;
+    local V17Inventory V17Inv;
+    local V17InventoryManager V17InvM;
+    
+    V17InvM=V17InventoryManager(Pawn.InvManager);
+    
+    ForEach V17InvM.InventoryActors(class'V17Weapon', V17Weap) `log("Weapon "$string(V17Weap.Name)$" at slot "$V17Weap.ItemSlot);
+    ForEach V17InvM.InventoryActors(class'V17Inventory', V17Inv) `log("Item "$string(V17Inv.Name)$" at slot "$V17Inv.ItemSlot);
+}
+
+exec Function WhoAmI(){
+    
+    local GameReplicationInfo           GRI;
+    local PlayerReplicationInfo         PRI;
+    local int theID;
+    
+    //calling player info
+    
+    
+    //Get GRI
+    GRI = WorldInfo.GRI;
+    
+    //loop thru all player infos
+    foreach GRI.PRIArray(PRI) {
+        
+        if (playerreplicationinfo == PRI)
+        {
+            clientmessage("this is my info!");
+
+            theID = V17ReplicationInfo(PRI).playerID;
+
+        clientmessage("YourUniqueID"@theID);
+        }
+    }
+}
+
+reliable client function CreateHud()
+{
+    if ( myHUD != None )
+    {
+        myHUD.Destroy();
+    }
+    `log("CREATING THE HUD ON THE PLAYER");
+    myHUD  = spawn(class'V17HUD', self);
+    V17HUD(myHUD).InitInventory();
+}
+
+state PlayerWalking
+{
+    ignores SeePlayer, HearNoise, Bump;
+ 
+    function PlayerMove( float DeltaTime )
+    {
+        local vector            X,Y,Z, NewAccel;
+        local eDoubleClickDir   DoubleClickMove;
+        local rotator           OldRotation;
+        local bool              bSaveJump;
+ 
+        if( Pawn == None )
+        {
+            GotoState('Dead');
+        }
+        else
+        {
+            GetAxes(Pawn.Rotation,X,Y,Z);
+ 
+            // La aceleraci??n (y en consecuencia el movimiento) es diferente seg??n el tipo de arma que lleve el Pawn
+            
+            if(!Pawn.isA('Character') || Character(Pawn).WeaponType == PWT_Default)
+            {
+                NewAccel = Abs(PlayerInput.aForward)*X + Abs(PlayerInput.aStrafe)*X;
+            }
+            else
+            {
+                NewAccel = PlayerInput.aForward*X + PlayerInput.aStrafe*Y;
+            }
+           
+            NewAccel.Z  = 0;
+            NewAccel = Pawn.AccelRate * Normal(NewAccel);
+ 
+            if (IsLocalPlayerController())
+            {
+                AdjustPlayerWalkingMoveAccel(NewAccel);
+            }
+ 
+            DoubleClickMove = PlayerInput.CheckForDoubleClickMove( DeltaTime/WorldInfo.TimeDilation );
+ 
+            // Update rotation.
+            OldRotation = Rotation;
+            UpdateRotation( DeltaTime );
+            bDoubleJump = false;
+ 
+            if( bPressedJump && Pawn.CannotJumpNow() )
+            {
+                bSaveJump = true;
+                bPressedJump = false;
+            }
+            else
+            {
+                bSaveJump = false;
+            }
+ 
+            if( Role < ROLE_Authority ) // then save this move and replicate it
+            {
+                ReplicateMove(DeltaTime, NewAccel, DoubleClickMove, OldRotation - Rotation);
+            }
+            else
+            {
+                ProcessMove(DeltaTime, NewAccel, DoubleClickMove, OldRotation - Rotation);
+            }
+            bPressedJump = bSaveJump;
+        }
+    }
+}
+ 
+function UpdateRotation( float DeltaTime )
+{
+    local Rotator DeltaRot, newRotation, ViewRotation;
+    local Rotator CurrentRot;
+    local vector X, Y, Z, newRotationVector;
+ 
+    ViewRotation = Rotation;
+    if (Pawn!=none)
+    {
+        Pawn.SetDesiredRotation(ViewRotation);
+    }
+ 
+    // Calculate Delta to be applied on ViewRotation
+    DeltaRot.Yaw = PlayerInput.aTurn;
+    DeltaRot.Pitch = PlayerInput.aLookUp;
+ 
+    ProcessViewRotation( DeltaTime, ViewRotation, DeltaRot );
+    SetRotation(ViewRotation);
+ 
+    //Rotaci??n del Pawn
+    if ( Pawn != None )
+    {
+        // Se aplica el giro
+        if (bTurningToFire || Pawn.IsFiring())  // si est?? disparando (o girando para disparar)
+        {
+            // Pawn mira a donde mira la c??mara
+            NewRotation = ViewRotation;
+            NewRotation.Roll = Rotation.Roll;
+            CurrentRot = RLerp(Pawn.Rotation, newRotation, RotationSpeed * DeltaTime, true);
+            Pawn.FaceRotation(CurrentRot, deltatime);
+ 
+            if(bTurningToFire)
+            {
+                CheckIfCanFire(lastFireModeNum);
+            }
+        }
+        else if(PlayerInput.aForward != 0.0 || PlayerInput.aStrafe != 0.0)  // o en movimiento sin disparar
+        {
+            // Giro solidario con la c??mara. Pawn mira a donde mira la c??mara
+            if( Character(Pawn)!=None && Character(Pawn).WeaponType != PWT_Default )
+            {
+                NewRotation = ViewRotation;
+                NewRotation.Roll = Rotation.Roll;
+                CurrentRot = RLerp(Pawn.Rotation, newRotation, RotationSpeed * DeltaTime, true);
+            }
+            else    // Giro relativo a la c??mara. Pawn se gira hacia su direcci??n de movimiento
+            {
+                GetAxes(ViewRotation, X, Y, Z);
+                newRotationVector = PlayerInput.aForward * X + PlayerInput.aStrafe * Y;
+                newRotationVector.Z = 0;
+                NewRotation = rotator(Normal(newRotationVector));
+                CurrentRot = RLerp(Pawn.Rotation, NewRotation, RotationSpeed * DeltaTime, true);
+            }
+            Pawn.FaceRotation(CurrentRot, deltatime);
+        }
+    }
+}
+
+function SetRotationAmmount(int a)
+{
+    RotationSpeed=a;
+} 
+exec function displayrotation()
+{
+    WorldInfo.Game.Broadcast(self,"rotation: "@RotationSpeed); 
+}
+
+// KeyEvents 
+
+exec function SheathWeapon()
+{
+    if(Role<ROLE_Authority) ServerSheath();
+    else{
+        //`log("============");
+        //`log( "sheath weapon called, equippedwep? "@V17Pawn(Pawn).HasEquippedWeapon@" currwep "@V17Pawn(Pawn).CurrentWeapon);
+    if(V17Pawn(Pawn).HasEquippedWeapon)
+    {
+        //Character(Pawn).WeaponSheathed=!Character(Pawn).WeaponSheathed;
+        V17Pawn(Pawn).CurrentWeapon.SetMode(V17Pawn(Pawn).CurrentWeapon.Sheathed);
+    }
+    }
+}
+
+reliable server function ServerSheath()
+{
+    SheathWeapon();
+}
+
+exec function bbA(bool aa)
+{
+    //`log( "bba called ");
+    if(Role<ROLE_Authority) ServerBB(aa,1);
+    bA=aa;
+}
+exec function bbD(bool aa)
+{ 
+    //`log( "bbd called ");
+    if(Role<ROLE_Authority) ServerBB(aa,2);
+    bD=aa;
+}
+exec function bbW(bool aa)
+{
+    //`log( "bbw called ");
+    if(Role<ROLE_Authority) ServerBB(aa,3);
+    bW=aa;
+}
+exec function bbAlt(bool aa)
+{
+    //`log( "bbalt called ");
+    if(Role<ROLE_Authority) ServerBB(aa,4);
+    bAlt=aa;
+}
+
+reliable server function ServerBB(bool aa, int mode)
+{
+    if(mode==1) bbA(aa);
+    if(mode==2) bbD(aa);
+    if(mode==3) bbW(aa);
+    if(mode==4) bbAlt(aa);
+}
+
+exec function Walk()
+{
+    if(Role<ROLE_Authority) WalkServ();
+    //`log("fagot walkin ");
+     V17Pawn(Pawn).GroundSpeed = V17Pawn(Pawn).Default.Groundspeed;
+}
+
+exec function Run()
+{
+    if(Role<ROLE_Authority) RunServ();
+    // `log( "fagot runnin");
+    V17Pawn(Pawn).GroundSpeed = V17Pawn(Pawn).speed2;
+}
+
+reliable server function WalkServ()
+{
+    Walk();
+}
+reliable server function RunServ()
+{
+    Run();
+}
+
+exec function StartFire( optional byte FireModeNum )
+{
+    if ( Pawn != None && !bCinematicMode && !WorldInfo.bPlayersOnly && !IsPaused())
+    {
+        lastFireModeNum = FireModeNum;      // Se guarda el modo de disparo para los disparos retardados.
+        if(CheckIfCanFire(FireModeNum))     // Si se puede disparar directamente:
+        {
+            Pawn.StartFire( FireModeNum );  // se hace.
+        }
+    }
+}
+ 
+exec function StopFire(optional byte FireModeNum)
+{
+    Super.StopFire(FireModeNum);
+    if(bTurningToFire)              // Si se ha dejado de pulsar el bot??n de disparo mientras se gira,
+    {
+        bPendingStopFire = true;    // se activa el flag para tenerlo en cuenta.
+    }
+}
+ 
+// Comprueba si el ??ngulo del Pawn es el adecuado para disparar. En caso contrario, activa el giro y recuerda el disparo pendiente.
+function bool CheckIfCanFire(optional byte FireModeNum)
+{
+    local float cosAng;     //Coseno de ??ngulo
+ 
+    // Podr?? disparar si Postura es Default
+    if(V17Pawn(Pawn).WeaponType == PWT_Default)
+    {
+        return true;
+    }
+    // Si la diferencia entre la rotaci??n actual del Pawn y del Controller es inferior a cierto l??mite, puede disparar
+    cosAng = Normal(vector(Rotation) * vect(1.0,1.0,0.0)) dot Normal(vector(Pawn.Rotation));
+    if((1 - cosAng) < 0.01)
+    {
+        if(bTurningToFire)  // Si est??bamos girando...
+        {
+            bTurningToFire=false;           
+            Pawn.StartFire(FireModeNum);    
+            if(bPendingStopFire)            
+            {
+                Pawn.StopFire(FireModeNum); 
+                bPendingStopFire = false;   
+            }
+        }
+        return true;
+    }
+    else   
+    {
+        bTurningToFire=true;
+        return false;
+    }
+}
+
+ 
+
+
+//this function is called by a button press
+exec function PawnSwap()
+{
+    
+    if( Pawn.isA('Character') )
+    {
+          
+     //check if theres a pawn near by
+    ForEach Pawn.OverlappingActors(class'Pawn', OtherP, CrashingDistance)
+    {
+        if (OtherP != None && OtherP != Pawn) //if there is one close enough
+        {
+          //possess the pawn
+          
+          Hero=Pawn;
+          UnPossess(); 
+          Possess(OtherP, false);
+          RotationSpeed=5;
+          break;
+        }
+    }
+    }
+    else
+    {
+        UnPossess();
+        //Hero.Detach(OtherP);
+        //OtherP.Detach(Hero);
+        Possess(Hero, false);
+        RotationSpeed=8;
+    }
+}
+
+exec function SwitchWeapon(byte T)
+{
+    if (Character(Pawn) != None)
+    {
+         //WorldInfo.Game.Broadcast(self,"switchin weap "); 
+         Character(Pawn).SwitchWeapon(t);
+    }
+}
+
+
+exec function MyJump()
+{
+    local Dragon drag;
+    drag=Dragon(Pawn);
+    if( !IsInState( 'PlayerFlying' ) && drag!=none )
+    {
+        GotoState( 'PlayerFlying' );
+        //bCheatFlying = true;
+        SetTimer( 2.0f, true,  nameof(Land1) );
+    }
+}
+
+
+function Land1()
+{
+    local Dragon drag;
+    drag=Dragon(Pawn);
+    if(IsInState( 'PlayerFlying'))
+    {
+    if( drag != none )
+    {
+        //WorldInfo.Game.Broadcast(self,  "Not none:  "@drag );
+
+        if( !FastTrace( drag.Location + vect( 0, 0, -320 ), drag.Location, vect( 5, 5, 5 ), false ) )
+        {
+            if( drag.Physics != Phys_Walking )
+            {
+                drag.SetPhysics( Phys_Walking );
+
+                if( !IsInState( 'PlayerWalking' ) )
+                {
+                    GotoState( 'PlayerWalking' );
+                    ClearTimer( nameof( Land1 ) );
+                    //ClearTimer( nameof( Land ) );
+                }
+            }
+        }
+    }
+    }
+}
+
+exec function PrevWeapon()
+{
+    // disabled changing of weapons
+}
+
+exec function NextWeapon()
+{
+    // disabled changing of weapons
+}
+
+exec function ToggleInventory()
+{
+    V17HUD(myHUD).ToggleInventory(!V17HUD(myHUD).InventoryMovie.bMovieIsOpen);
+}
+
+
+defaultproperties
+{
+    Hero=None;
+    RotationSpeed=8
+    CrashingDistance=80
+    MyTypeOfPlayer=0
+}
